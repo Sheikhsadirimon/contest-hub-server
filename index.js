@@ -2,21 +2,36 @@ const express = require("express");
 const cors = require("cors");
 const app = express();
 require("dotenv").config();
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const admin = require("firebase-admin");
 
 const port = process.env.PORT || 3000;
-
-// middleware
-app.use(express.json());
-app.use(cors());
 
 const serviceAccount = require("./contest-hub-firebase-adminsdk.json"); // Download from Firebase Console
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
+
+// middleware
+app.use(express.json());
+app.use(cors());
+
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "Unauthorized" });
+  }
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.user = { uid: decoded.uid, email: decoded.email };
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "Invalid token" });
+  }
+};
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@clusterpro.d9ffs3x.mongodb.net/?appName=ClusterPro`;
 
@@ -37,29 +52,6 @@ async function run() {
     const usersCollection = db.collection("users");
     const contestsCollection = db.collection("contests");
 
-    // ==================== FIREBASE TOKEN VERIFICATION ====================
-    const verifyFirebaseToken = async (req, res, next) => {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).send({ message: "Unauthorized access" });
-      }
-
-      const token = authHeader.split(" ")[1];
-
-      try {
-        const decoded = await admin.auth().verifyIdToken(token);
-        req.user = {
-          uid: decoded.uid,
-          email: decoded.email,
-          role: null, // We'll fetch from DB
-        };
-        next();
-      } catch (error) {
-        console.error("Token verification failed:", error);
-        return res.status(401).send({ message: "Invalid or expired token" });
-      }
-    };
-
     // Role verification (after fetching from DB)
     const verifyRole = (requiredRole) => async (req, res, next) => {
       try {
@@ -75,8 +67,6 @@ async function run() {
         res.status(500).send({ message: "Server error" });
       }
     };
-
-    // ==================== USER ROUTES ====================
 
     // POST /users - Create or update user on signup/login
     app.post("/users", async (req, res) => {
@@ -112,34 +102,116 @@ async function run() {
       res.send(user);
     });
 
-    // Admin: Get all users
+    // ==================== ADMIN ROUTES ====================
+
+    // GET /admin/users - All users
     app.get(
       "/admin/users",
       verifyFirebaseToken,
       verifyRole("admin"),
       async (req, res) => {
-        const users = await usersCollection.find({}).toArray();
-        res.send(users);
+        try {
+          const users = await usersCollection
+            .find({})
+            .project({ uid: 1, email: 1, displayName: 1, photoURL: 1, role: 1 })
+            .toArray();
+          res.send(users);
+        } catch (error) {
+          console.error("Error fetching users:", error);
+          res.status(500).send({ error: "Failed to fetch users" });
+        }
       }
     );
 
-    // Admin: Change user role
+    // PATCH /admin/users/:id/role - Change role
     app.patch(
       "/admin/users/:id/role",
       verifyFirebaseToken,
       verifyRole("admin"),
       async (req, res) => {
+        const { id } = req.params;
         const { role } = req.body;
+
         if (!["user", "creator", "admin"].includes(role)) {
           return res.status(400).send({ error: "Invalid role" });
         }
-        const result = await usersCollection.updateOne(
-          { _id: new ObjectId(req.params.id) },
-          { $set: { role } }
-        );
-        if (result.matchedCount === 0)
-          return res.status(404).send({ error: "User not found" });
-        res.send({ success: true });
+
+        try {
+          const result = await usersCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { role } }
+          );
+
+          if (result.matchedCount === 0) {
+            return res.status(404).send({ error: "User not found" });
+          }
+
+          console.log("Role updated:", { userId: id, newRole: role });
+          res.send({ success: true });
+        } catch (error) {
+          console.error("Role update failed:", error);
+          res.status(500).send({ error: "Failed to update role" });
+        }
+      }
+    );
+
+    // GET /admin/contests - All contests (for admin)
+    app.get(
+      "/admin/contests",
+      verifyFirebaseToken,
+      verifyRole("admin"),
+      async (req, res) => {
+        try {
+          const contests = await contestsCollection.find({}).toArray();
+          res.send(contests);
+        } catch (error) {
+          res.status(500).send({ error: "Failed to fetch contests" });
+        }
+      }
+    );
+
+    // PATCH /admin/contests/:id - Approve/Reject/Delete
+    app.patch(
+      "/admin/contests/:id",
+      verifyFirebaseToken,
+      verifyRole("admin"),
+      async (req, res) => {
+        const { id } = req.params;
+        const { action } = req.body;
+
+        if (!["approve", "reject", "delete"].includes(action)) {
+          return res.status(400).send({ error: "Invalid action" });
+        }
+
+        try {
+          if (action === "delete") {
+            const deleteResult = await contestsCollection.deleteOne({
+              _id: new ObjectId(id),
+            });
+            if (deleteResult.deletedCount === 0) {
+              return res.status(404).send({ error: "Contest not found" });
+            }
+            return res.send({ success: true });
+          }
+
+          const update =
+            action === "approve"
+              ? { status: "approved" }
+              : { status: "rejected" };
+          const updateResult = await contestsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: update }
+          );
+
+          if (updateResult.matchedCount === 0) {
+            return res.status(404).send({ error: "Contest not found" });
+          }
+
+          res.send({ success: true });
+        } catch (error) {
+          console.error("Contest action failed:", error);
+          res.status(500).send({ error: "Failed to process contest" });
+        }
       }
     );
 
@@ -153,10 +225,24 @@ async function run() {
       res.send(contests);
     });
 
-    app.post("/contests", async (req, res) => {
-      const contest = req.body;
-      const result = await contestsCollection.insertOne(contest);
-      res.send({ ...contest, _id: result.insertedId });
+    // POST /contests - Creator adds contest (pending)
+    app.post("/contests", verifyFirebaseToken, verifyRole("creator"), async (req, res) => {
+      const contestData = {
+        ...req.body,
+        creatorUid: req.user.uid,
+        creatorEmail: req.user.email,
+        status: "pending",
+        participants: 0,
+        createdAt: new Date(),
+      };
+
+      try {
+        const result = await contestsCollection.insertOne(contestData);
+        res.send({ ...contestData, _id: result.insertedId });
+      } catch (error) {
+        console.error("Contest creation failed:", error);
+        res.status(500).send({ error: "Failed to create contest" });
+      }
     });
 
     app.get("/contest/:id", async (req, res) => {
@@ -179,7 +265,7 @@ async function run() {
 run().catch(console.dir);
 
 app.get("/", (req, res) => {
-  res.send("A place for your contests");
+  res.send("Contest-Hub is running and gunning");
 });
 
 app.listen(port, () => {
