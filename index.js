@@ -215,7 +215,7 @@ async function run() {
       }
     );
 
-    // contests api
+    // contests api-
     app.get("/contests", async (req, res) => {
       const contests = await contestsCollection
         .find({})
