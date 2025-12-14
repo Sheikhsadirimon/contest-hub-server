@@ -228,58 +228,112 @@ async function run() {
     // ==================== CREATOR ROUTES ====================
 
     // GET /creator/contests - Creator's own contests
-    app.get("/creator/contests", verifyFirebaseToken, verifyRole("creator"), async (req, res) => {
-      try {
-        const contests = await contestsCollection
-          .find({ creatorUid: req.user.uid })
-          .sort({ createdAt: -1 })
-          .toArray();
-        res.send(contests);
-      } catch (error) {
-        res.status(500).send({ error: "Failed to fetch contests" });
+    app.get(
+      "/creator/contests",
+      verifyFirebaseToken,
+      verifyRole("creator"),
+      async (req, res) => {
+        try {
+          const contests = await contestsCollection
+            .find({ creatorUid: req.user.uid })
+            .sort({ createdAt: -1 })
+            .toArray();
+          res.send(contests);
+        } catch (error) {
+          res.status(500).send({ error: "Failed to fetch contests" });
+        }
       }
-    });
+    );
 
     // POST /contests - Creator adds contest (pending)
-    app.post("/contests", verifyFirebaseToken, verifyRole("creator"), async (req, res) => {
-      const contestData = {
-        ...req.body,
-        creatorUid: req.user.uid,
-        creatorEmail: req.user.email,
-        status: "pending",
-        participants: 0,
-        createdAt: new Date(),
-      };
+    app.post(
+      "/contests",
+      verifyFirebaseToken,
+      verifyRole("creator"),
+      async (req, res) => {
+        const contestData = {
+          ...req.body,
+          creatorUid: req.user.uid,
+          creatorEmail: req.user.email,
+          status: "pending",
+          participants: 0,
+          createdAt: new Date(),
+        };
 
-      try {
-        const result = await contestsCollection.insertOne(contestData);
-        res.send({ ...contestData, _id: result.insertedId });
-      } catch (error) {
-        console.error("Contest creation failed:", error);
-        res.status(500).send({ error: "Failed to create contest" });
+        try {
+          const result = await contestsCollection.insertOne(contestData);
+          res.send({ ...contestData, _id: result.insertedId });
+        } catch (error) {
+          console.error("Contest creation failed:", error);
+          res.status(500).send({ error: "Failed to create contest" });
+        }
       }
-    });
+    );
 
     // DELETE /contests/:id - Creator deletes pending contest
-    app.delete("/contests/:id", verifyFirebaseToken, verifyRole("creator"), async (req, res) => {
-      const { id } = req.params;
+    app.delete(
+      "/contests/:id",
+      verifyFirebaseToken,
+      verifyRole("creator"),
+      async (req, res) => {
+        const { id } = req.params;
 
-      try {
-        const contest = await contestsCollection.findOne({ _id: new ObjectId(id) });
-        if (!contest || contest.creatorUid !== req.user.uid) {
-          return res.status(403).send({ error: "Forbidden: Not your contest" });
-        }
-        if (contest.status !== "pending") {
-          return res.status(400).send({ error: "Can only delete pending contests" });
-        }
+        try {
+          const contest = await contestsCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          if (!contest || contest.creatorUid !== req.user.uid) {
+            return res
+              .status(403)
+              .send({ error: "Forbidden: Not your contest" });
+          }
+          if (contest.status !== "pending") {
+            return res
+              .status(400)
+              .send({ error: "Can only delete pending contests" });
+          }
 
-        await contestsCollection.deleteOne({ _id: new ObjectId(id) });
-        res.send({ success: true });
-      } catch (error) {
-        console.error("Delete failed:", error);
-        res.status(500).send({ error: "Failed to delete contest" });
+          await contestsCollection.deleteOne({ _id: new ObjectId(id) });
+          res.send({ success: true });
+        } catch (error) {
+          console.error("Delete failed:", error);
+          res.status(500).send({ error: "Failed to delete contest" });
+        }
       }
-    });
+    );
+
+    // PATCH /contests/:id - Creator updates pending contest
+    app.patch(
+      "/contests/:id",
+      verifyFirebaseToken,
+      verifyRole("creator"),
+      async (req, res) => {
+        const { id } = req.params;
+        const updateData = req.body;
+
+        try {
+          const contest = await contestsCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          if (!contest || contest.creatorUid !== req.user.uid) {
+            return res.status(403).send({ error: "Forbidden" });
+          }
+          if (contest.status !== "pending") {
+            return res
+              .status(400)
+              .send({ error: "Can only edit pending contests" });
+          }
+
+          await contestsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: updateData }
+          );
+          res.send({ success: true });
+        } catch (error) {
+          res.status(500).send({ error: "Failed to update contest" });
+        }
+      }
+    );
 
     app.get("/contest/:id", async (req, res) => {
       const id = req.params.id;
