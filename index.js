@@ -260,6 +260,27 @@ async function run() {
       }
     });
 
+    // DELETE /contests/:id - Creator deletes pending contest
+    app.delete("/contests/:id", verifyFirebaseToken, verifyRole("creator"), async (req, res) => {
+      const { id } = req.params;
+
+      try {
+        const contest = await contestsCollection.findOne({ _id: new ObjectId(id) });
+        if (!contest || contest.creatorUid !== req.user.uid) {
+          return res.status(403).send({ error: "Forbidden: Not your contest" });
+        }
+        if (contest.status !== "pending") {
+          return res.status(400).send({ error: "Can only delete pending contests" });
+        }
+
+        await contestsCollection.deleteOne({ _id: new ObjectId(id) });
+        res.send({ success: true });
+      } catch (error) {
+        console.error("Delete failed:", error);
+        res.status(500).send({ error: "Failed to delete contest" });
+      }
+    });
+
     app.get("/contest/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
