@@ -225,6 +225,21 @@ async function run() {
       res.send(contests);
     });
 
+    // ==================== CREATOR ROUTES ====================
+
+    // GET /creator/contests - Creator's own contests
+    app.get("/creator/contests", verifyFirebaseToken, verifyRole("creator"), async (req, res) => {
+      try {
+        const contests = await contestsCollection
+          .find({ creatorUid: req.user.uid })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(contests);
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch contests" });
+      }
+    });
+
     // POST /contests - Creator adds contest (pending)
     app.post("/contests", verifyFirebaseToken, verifyRole("creator"), async (req, res) => {
       const contestData = {
