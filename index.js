@@ -3,33 +3,42 @@ const cors = require("cors");
 const app = express();
 require("dotenv").config();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const admin = require("firebase-admin");
 
 const port = process.env.PORT || 3000;
 
-const serviceAccount = require("./contest-hub-firebase-adminsdk.json"); // Download from Firebase Console
+const serviceAccount = require("./contest-hub-firebase-adminsdk.json");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-// middleware
+// Middleware
 app.use(express.json());
-app.use(cors());
+app.use(
+  cors({
+    origin: ["http://localhost:5173"],
+    credentials: true,
+  })
+);
 
 const verifyFirebaseToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    return res.status(401).send({ message: "Unauthorized" });
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "Unauthorized access" });
   }
+
   const token = authHeader.split(" ")[1];
+
   try {
     const decoded = await admin.auth().verifyIdToken(token);
     req.user = { uid: decoded.uid, email: decoded.email };
     next();
   } catch (error) {
-    return res.status(401).send({ message: "Invalid token" });
+    console.error("Invalid Firebase token:", error.message);
+    return res.status(401).send({ message: "Invalid or expired token" });
   }
 };
 
@@ -43,16 +52,20 @@ const client = new MongoClient(uri, {
   },
 });
 
+let contestsCollection,
+  usersCollection,
+  submissionsCollection,
+  paymentsCollection;
+
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
-
     const db = client.db("contest_hub_db");
-    const usersCollection = db.collection("users");
-    const contestsCollection = db.collection("contests");
+    usersCollection = db.collection("users");
+    contestsCollection = db.collection("contests");
+    submissionsCollection = db.collection("submissions");
+    paymentsCollection = db.collection("payments"); // New collection
 
-    // Role verification (after fetching from DB)
     const verifyRole = (requiredRole) => async (req, res, next) => {
       try {
         const userDoc = await usersCollection.findOne({ uid: req.user.uid });
@@ -61,20 +74,18 @@ async function run() {
             .status(403)
             .send({ message: "Forbidden: Insufficient role" });
         }
-        req.user.role = userDoc.role; // Attach role
+        req.user.role = userDoc.role;
         next();
       } catch (error) {
         res.status(500).send({ message: "Server error" });
       }
     };
 
-    // POST /users - Create or update user on signup/login
+    // ==================== USER ROUTES ====================
     app.post("/users", async (req, res) => {
       const { uid, email, displayName, photoURL } = req.body;
-
-      if (!uid || !email) {
+      if (!uid || !email)
         return res.status(400).send({ error: "uid and email required" });
-      }
 
       const userDoc = {
         uid,
@@ -85,167 +96,110 @@ async function run() {
         createdAt: new Date(),
       };
 
-      const result = await usersCollection.updateOne(
+      await usersCollection.updateOne(
         { uid },
         { $setOnInsert: userDoc },
         { upsert: true }
       );
-
-      res.send({ success: true, role: "user" });
+      res.send({ success: true });
     });
 
-    // GET /user/:uid - Get user data (role, etc.)
-    app.get("/user/:uid", async (req, res) => {
-      const uid = req.params.uid;
-      const user = await usersCollection.findOne({ uid });
+    app.get("/user/:uid", verifyFirebaseToken, async (req, res) => {
+      if (req.params.uid !== req.user.uid) {
+        return res.status(403).send({ error: "Forbidden" });
+      }
+      const user = await usersCollection.findOne({ uid: req.params.uid });
       if (!user) return res.status(404).send({ error: "User not found" });
       res.send(user);
     });
 
     // ==================== ADMIN ROUTES ====================
-
-    // GET /admin/users - All users
     app.get(
       "/admin/users",
       verifyFirebaseToken,
       verifyRole("admin"),
       async (req, res) => {
-        try {
-          const users = await usersCollection
-            .find({})
-            .project({ uid: 1, email: 1, displayName: 1, photoURL: 1, role: 1 })
-            .toArray();
-          res.send(users);
-        } catch (error) {
-          console.error("Error fetching users:", error);
-          res.status(500).send({ error: "Failed to fetch users" });
-        }
+        const users = await usersCollection
+          .find({})
+          .project({ uid: 1, email: 1, displayName: 1, photoURL: 1, role: 1 })
+          .toArray();
+        res.send(users);
       }
     );
 
-    // PATCH /admin/users/:id/role - Change role
     app.patch(
       "/admin/users/:id/role",
       verifyFirebaseToken,
       verifyRole("admin"),
       async (req, res) => {
-        const { id } = req.params;
         const { role } = req.body;
-
-        if (!["user", "creator", "admin"].includes(role)) {
+        if (!["user", "creator", "admin"].includes(role))
           return res.status(400).send({ error: "Invalid role" });
-        }
 
-        try {
-          const result = await usersCollection.updateOne(
-            { _id: new ObjectId(id) },
-            { $set: { role } }
-          );
-
-          if (result.matchedCount === 0) {
-            return res.status(404).send({ error: "User not found" });
-          }
-
-          console.log("Role updated:", { userId: id, newRole: role });
-          res.send({ success: true });
-        } catch (error) {
-          console.error("Role update failed:", error);
-          res.status(500).send({ error: "Failed to update role" });
-        }
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { role } }
+        );
+        if (result.matchedCount === 0)
+          return res.status(404).send({ error: "User not found" });
+        res.send({ success: true });
       }
     );
 
-    // GET /admin/contests - All contests (for admin)
     app.get(
       "/admin/contests",
       verifyFirebaseToken,
       verifyRole("admin"),
       async (req, res) => {
-        try {
-          const contests = await contestsCollection.find({}).toArray();
-          res.send(contests);
-        } catch (error) {
-          res.status(500).send({ error: "Failed to fetch contests" });
-        }
+        const contests = await contestsCollection.find({}).toArray();
+        res.send(contests);
       }
     );
 
-    // PATCH /admin/contests/:id - Approve/Reject/Delete
     app.patch(
       "/admin/contests/:id",
       verifyFirebaseToken,
       verifyRole("admin"),
       async (req, res) => {
-        const { id } = req.params;
         const { action } = req.body;
-
-        if (!["approve", "reject", "delete"].includes(action)) {
+        if (!["approve", "reject", "delete"].includes(action))
           return res.status(400).send({ error: "Invalid action" });
+
+        if (action === "delete") {
+          await contestsCollection.deleteOne({
+            _id: new ObjectId(req.params.id),
+          });
+          return res.send({ success: true });
         }
 
-        try {
-          if (action === "delete") {
-            const deleteResult = await contestsCollection.deleteOne({
-              _id: new ObjectId(id),
-            });
-            if (deleteResult.deletedCount === 0) {
-              return res.status(404).send({ error: "Contest not found" });
-            }
-            return res.send({ success: true });
-          }
-
-          const update =
-            action === "approve"
-              ? { status: "approved" }
-              : { status: "rejected" };
-          const updateResult = await contestsCollection.updateOne(
-            { _id: new ObjectId(id) },
-            { $set: update }
-          );
-
-          if (updateResult.matchedCount === 0) {
-            return res.status(404).send({ error: "Contest not found" });
-          }
-
-          res.send({ success: true });
-        } catch (error) {
-          console.error("Contest action failed:", error);
-          res.status(500).send({ error: "Failed to process contest" });
-        }
+        const update =
+          action === "approve"
+            ? { status: "approved" }
+            : { status: "rejected" };
+        const result = await contestsCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: update }
+        );
+        if (result.matchedCount === 0)
+          return res.status(404).send({ error: "Contest not found" });
+        res.send({ success: true });
       }
     );
 
-    // contests api-
-    app.get("/contests", async (req, res) => {
-      const contests = await contestsCollection
-        .find({})
-        .sort({ participants: -1 }) // Highest participants first
-        .limit(10) // Optional: limit if you want
-        .toArray();
-      res.send(contests);
-    });
-
     // ==================== CREATOR ROUTES ====================
-
-    // GET /creator/contests - Creator's own contests
     app.get(
       "/creator/contests",
       verifyFirebaseToken,
       verifyRole("creator"),
       async (req, res) => {
-        try {
-          const contests = await contestsCollection
-            .find({ creatorUid: req.user.uid })
-            .sort({ createdAt: -1 })
-            .toArray();
-          res.send(contests);
-        } catch (error) {
-          res.status(500).send({ error: "Failed to fetch contests" });
-        }
+        const contests = await contestsCollection
+          .find({ creatorUid: req.user.uid })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(contests);
       }
     );
 
-    // POST /contests - Creator adds contest (pending)
     app.post(
       "/contests",
       verifyFirebaseToken,
@@ -256,108 +210,208 @@ async function run() {
           creatorUid: req.user.uid,
           creatorEmail: req.user.email,
           status: "pending",
-          participants: 0,
+          participants: 0, // Number
           createdAt: new Date(),
         };
 
-        try {
-          const result = await contestsCollection.insertOne(contestData);
-          res.send({ ...contestData, _id: result.insertedId });
-        } catch (error) {
-          console.error("Contest creation failed:", error);
-          res.status(500).send({ error: "Failed to create contest" });
-        }
+        const result = await contestsCollection.insertOne(contestData);
+        res.send({ ...contestData, _id: result.insertedId });
       }
     );
 
-    // DELETE /contests/:id - Creator deletes pending contest
-    app.delete(
-      "/contests/:id",
-      verifyFirebaseToken,
-      verifyRole("creator"),
-      async (req, res) => {
-        const { id } = req.params;
-
-        try {
-          const contest = await contestsCollection.findOne({
-            _id: new ObjectId(id),
-          });
-          if (!contest || contest.creatorUid !== req.user.uid) {
-            return res
-              .status(403)
-              .send({ error: "Forbidden: Not your contest" });
-          }
-          if (contest.status !== "pending") {
-            return res
-              .status(400)
-              .send({ error: "Can only delete pending contests" });
-          }
-
-          await contestsCollection.deleteOne({ _id: new ObjectId(id) });
-          res.send({ success: true });
-        } catch (error) {
-          console.error("Delete failed:", error);
-          res.status(500).send({ error: "Failed to delete contest" });
-        }
-      }
-    );
-
-    // PATCH /contests/:id - Creator updates pending contest
     app.patch(
       "/contests/:id",
       verifyFirebaseToken,
       verifyRole("creator"),
       async (req, res) => {
-        const { id } = req.params;
-        const updateData = req.body;
+        const contest = await contestsCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (
+          !contest ||
+          contest.creatorUid !== req.user.uid ||
+          contest.status !== "pending"
+        ) {
+          return res.status(403).send({ error: "Forbidden" });
+        }
+        await contestsCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: req.body }
+        );
+        res.send({ success: true });
+      }
+    );
+
+    app.delete(
+      "/contests/:id",
+      verifyFirebaseToken,
+      verifyRole("creator"),
+      async (req, res) => {
+        const contest = await contestsCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (
+          !contest ||
+          contest.creatorUid !== req.user.uid ||
+          contest.status !== "pending"
+        ) {
+          return res.status(403).send({ error: "Forbidden" });
+        }
+        await contestsCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send({ success: true });
+      }
+    );
+
+    // ==================== PUBLIC ROUTES ====================
+    app.get("/contests", async (req, res) => {
+      const contests = await contestsCollection
+        .find({ status: "approved" })
+        .sort({ participants: -1 })
+        .toArray();
+      res.send(contests);
+    });
+
+    app.get("/contest/:id", async (req, res) => {
+      const contest = await contestsCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
+      if (!contest) return res.status(404).send({ error: "Contest not found" });
+      res.send(contest);
+    });
+
+    // ==================== PAYMENT ROUTES ====================
+    // Save payment and increase participants
+    app.post("/save-payment", verifyFirebaseToken, async (req, res) => {
+      const { contestId } = req.body;
+
+      try {
+        // Check if already paid
+        const existing = await paymentsCollection.findOne({
+          userUid: req.user.uid,
+          contestId,
+        });
+
+        if (existing) {
+          return res.send({ success: true, alreadyPaid: true });
+        }
+
+        // Save payment record
+        const paymentDoc = {
+          userUid: req.user.uid,
+          userEmail: req.user.email,
+          contestId,
+          status: "succeeded",
+          createdAt: new Date(),
+        };
+
+        await paymentsCollection.insertOne(paymentDoc);
+
+        // Increase participant count
+        await contestsCollection.updateOne(
+          { _id: new ObjectId(contestId) },
+          { $inc: { participants: 1 } }
+        );
+
+        res.send({ success: true });
+      } catch (error) {
+        console.error("Save payment failed:", error);
+        res.status(500).send({ error: "Failed to save payment" });
+      }
+    });
+
+    // Check if user paid for contest
+    app.get(
+      "/check-payment/:uid/:contestId",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { uid, contestId } = req.params;
+
+        if (req.user.uid !== uid) {
+          return res.status(403).send({ error: "Forbidden" });
+        }
+
+        const payment = await paymentsCollection.findOne({
+          userUid: uid,
+          contestId,
+        });
+
+        res.send({ paid: !!payment });
+      }
+    );
+
+    // Get user's participated contests for dashboard
+    app.get("/my-participated", verifyFirebaseToken, async (req, res) => {
+      const payments = await paymentsCollection
+        .find({ userUid: req.user.uid })
+        .toArray();
+
+      const contestIds = payments.map((p) => p.contestId);
+
+      if (contestIds.length === 0) {
+        return res.send([]);
+      }
+
+      const contests = await contestsCollection
+        .find({ _id: { $in: contestIds.map((id) => new ObjectId(id)) } })
+        .sort({ deadline: 1 }) // Upcoming first
+        .toArray();
+
+      res.send(contests);
+    });
+
+    // ==================== STRIPE CHECKOUT ====================
+    app.post(
+      "/create-checkout-session",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { contestId } = req.body;
 
         try {
           const contest = await contestsCollection.findOne({
-            _id: new ObjectId(id),
+            _id: new ObjectId(contestId),
           });
-          if (!contest || contest.creatorUid !== req.user.uid) {
-            return res.status(403).send({ error: "Forbidden" });
+          if (!contest || contest.status !== "approved") {
+            return res.status(400).send({ error: "Contest not approved" });
           }
-          if (contest.status !== "pending") {
-            return res
-              .status(400)
-              .send({ error: "Can only edit pending contests" });
+          if (new Date(contest.deadline) < new Date()) {
+            return res.status(400).send({ error: "Contest ended" });
           }
 
-          await contestsCollection.updateOne(
-            { _id: new ObjectId(id) },
-            { $set: updateData }
-          );
-          res.send({ success: true });
+          const session = await stripe.checkout.sessions.create({
+            payment_method_types: ["card"],
+            line_items: [
+              {
+                price_data: {
+                  currency: "usd",
+                  product_data: { name: `Entry: ${contest.name}` },
+                  unit_amount: contest.price * 100,
+                },
+                quantity: 1,
+              },
+            ],
+            mode: "payment",
+            success_url: `${process.env.CLIENT_URL}/contest/${contestId}?payment=success`,
+            cancel_url: `${process.env.CLIENT_URL}/contest/${contestId}?payment=cancel`,
+          });
+
+          res.send({ url: session.url });
         } catch (error) {
-          res.status(500).send({ error: "Failed to update contest" });
+          console.error("Checkout failed:", error);
+          res.status(500).send({ error: "Payment failed" });
         }
       }
     );
 
-    app.get("/contest/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await contestsCollection.findOne(query);
-      res.send(result);
-    });
-
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
+    console.log("MongoDB connected!");
+  } catch (error) {
+    console.error("Startup failed:", error);
   }
 }
+
 run().catch(console.dir);
 
-app.get("/", (req, res) => {
-  res.send("Contest-Hub is running and gunning");
-});
+app.get("/", (req, res) => res.send("ContestHub Backend Running!"));
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
