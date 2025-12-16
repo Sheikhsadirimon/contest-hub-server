@@ -264,6 +264,101 @@ async function run() {
       }
     );
 
+    // POST /creator/submissions - Get submissions for creator's contests
+    app.post(
+      "/creator/submissions",
+      verifyFirebaseToken,
+      verifyRole("creator"),
+      async (req, res) => {
+        const { contestIds } = req.body;
+
+        try {
+          const subs = await submissionsCollection
+            .find({ contestId: { $in: contestIds } })
+            .toArray();
+          res.send(subs);
+        } catch (error) {
+          res.status(500).send({ error: "Failed to fetch submissions" });
+        }
+      }
+    );
+
+    // PATCH /contests/:id/winner - Declare winner
+    app.patch(
+      "/contests/:id/winner",
+      verifyFirebaseToken,
+      verifyRole("creator"),
+      async (req, res) => {
+        const { id } = req.params;
+        const { winner } = req.body;
+
+        try {
+          const contest = await contestsCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          if (!contest || contest.creatorUid !== req.user.uid) {
+            return res.status(403).send({ error: "Forbidden" });
+          }
+          if (contest.winner) {
+            return res.status(400).send({ error: "Winner already declared" });
+          }
+
+          await contestsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { winner } }
+          );
+
+          res.send({ success: true });
+        } catch (error) {
+          res.status(500).send({ error: "Failed to declare winner" });
+        }
+      }
+    );
+
+    // POST /submissions - Save task submission
+    app.post("/submissions", verifyFirebaseToken, async (req, res) => {
+      const { contestId, userUid, userEmail, userName, task, submittedAt } =
+        req.body;
+
+      try {
+        // Optional: Check if user has paid (extra security)
+        const payment = await paymentsCollection.findOne({
+          userUid,
+          contestId,
+        });
+
+        if (!payment) {
+          return res.status(403).send({ error: "You must pay to submit" });
+        }
+
+        // Check if already submitted
+        const existing = await submissionsCollection.findOne({
+          userUid,
+          contestId,
+        });
+
+        if (existing) {
+          return res.status(400).send({ error: "You have already submitted" });
+        }
+
+        const submissionDoc = {
+          contestId,
+          userUid,
+          userEmail,
+          userName: userName || "Anonymous",
+          task,
+          submittedAt: new Date(submittedAt),
+        };
+
+        await submissionsCollection.insertOne(submissionDoc);
+
+        res.send({ success: true });
+      } catch (error) {
+        console.error("Submission failed:", error);
+        res.status(500).send({ error: "Failed to submit task" });
+      }
+    });
+
     // ==================== PUBLIC ROUTES ====================
     app.get("/contests", async (req, res) => {
       const contests = await contestsCollection
