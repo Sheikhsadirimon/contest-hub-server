@@ -317,7 +317,7 @@ async function run() {
 
     // POST /submissions - Save task submission
     app.post("/submissions", verifyFirebaseToken, async (req, res) => {
-      const { contestId, userUid, userEmail, userName, task, submittedAt } =
+      const { contestId, userUid, userEmail, userName,userPhotoURL, task, submittedAt } =
         req.body;
 
       try {
@@ -346,6 +346,7 @@ async function run() {
           userUid,
           userEmail,
           userName: userName || "Anonymous",
+          userPhotoURL, 
           task,
           submittedAt: new Date(submittedAt),
         };
