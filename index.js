@@ -295,30 +295,36 @@ async function run() {
         try {
           const contest = await contestsCollection.findOne({
             _id: new ObjectId(id),
+            creatorUid: req.user.uid,
           });
-          if (!contest || contest.creatorUid !== req.user.uid) {
-            return res.status(403).send({ error: "Forbidden" });
-          }
-          if (contest.winner) {
+          if (!contest) return res.status(403).send({ error: "Forbidden" });
+
+          if (contest.winner)
             return res.status(400).send({ error: "Winner already declared" });
-          }
 
           await contestsCollection.updateOne(
             { _id: new ObjectId(id) },
             { $set: { winner } }
           );
 
-          res.send({ success: true });
+          res.send({ success: true }); // ← Important: return success
         } catch (error) {
-          res.status(500).send({ error: "Failed to declare winner" });
+          res.status(500).send({ error: "Failed" });
         }
       }
     );
 
     // POST /submissions - Save task submission
     app.post("/submissions", verifyFirebaseToken, async (req, res) => {
-      const { contestId, userUid, userEmail, userName,userPhotoURL, task, submittedAt } =
-        req.body;
+      const {
+        contestId,
+        userUid,
+        userEmail,
+        userName,
+        userPhotoURL,
+        task,
+        submittedAt,
+      } = req.body;
 
       try {
         // Optional: Check if user has paid (extra security)
@@ -346,7 +352,7 @@ async function run() {
           userUid,
           userEmail,
           userName: userName || "Anonymous",
-          userPhotoURL, 
+          userPhotoURL,
           task,
           submittedAt: new Date(submittedAt),
         };
@@ -359,6 +365,26 @@ async function run() {
         res.status(500).send({ error: "Failed to submit task" });
       }
     });
+
+    // GET /check-submission/:uid/:contestId - Check if user submitted
+    app.get(
+      "/check-submission/:uid/:contestId",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { uid, contestId } = req.params;
+
+        if (req.user.uid !== uid) {
+          return res.status(403).send({ error: "Forbidden" });
+        }
+
+        const submission = await submissionsCollection.findOne({
+          userUid: uid,
+          contestId,
+        });
+
+        res.send({ submitted: !!submission });
+      }
+    );
 
     // ==================== PUBLIC ROUTES ====================
     app.get("/contests", async (req, res) => {
