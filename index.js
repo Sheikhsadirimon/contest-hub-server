@@ -435,6 +435,31 @@ async function run() {
       }
     });
 
+    // GET /contests/search?category=Design - Search by category
+    app.get("/contests/search", async (req, res) => {
+      const { category } = req.query;
+
+      try {
+        if (!category) {
+          return res.send([]);
+        }
+
+        const searchRegex = new RegExp(`^${category}$`, "i"); // Exact match, case-insensitive
+
+        const results = await contestsCollection
+          .find({
+            status: "approved",
+            category: searchRegex,
+          })
+          .toArray();
+
+        res.send(results);
+      } catch (error) {
+        console.error("Category search failed:", error);
+        res.status(500).send({ error: "Search failed" });
+      }
+    });
+
     // ==================== PAYMENT ROUTES ====================
     // Save payment and increase participants
     app.post("/save-payment", verifyFirebaseToken, async (req, res) => {
