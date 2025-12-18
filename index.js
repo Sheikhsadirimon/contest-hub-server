@@ -113,6 +113,24 @@ async function run() {
       res.send(user);
     });
 
+    app.patch("/user/:uid", verifyFirebaseToken, async (req, res) => {
+      const { uid } = req.params;
+      if (req.user.uid !== uid)
+        return res.status(403).send({ error: "Forbidden" });
+
+      const { displayName, photoURL, address } = req.body;
+
+      try {
+        await usersCollection.updateOne(
+          { uid },
+          { $set: { displayName, photoURL, address } }
+        );
+        res.send({ success: true });
+      } catch (error) {
+        res.status(500).send({ error: "Failed to update" });
+      }
+    });
+
     // ==================== ADMIN ROUTES ====================
     app.get(
       "/admin/users",
@@ -401,6 +419,20 @@ async function run() {
       });
       if (!contest) return res.status(404).send({ error: "Contest not found" });
       res.send(contest);
+    });
+
+    // GET /recent-winners - Last 3 contests with winners
+    app.get("/recent-winners", async (req, res) => {
+      try {
+        const winners = await contestsCollection
+          .find({ winner: { $exists: true } })
+          .sort({ "winner.declaredAt": -1 }) // or createdAt / deadline
+          .limit(3)
+          .toArray();
+        res.send(winners);
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch winners" });
+      }
     });
 
     // ==================== PAYMENT ROUTES ====================
