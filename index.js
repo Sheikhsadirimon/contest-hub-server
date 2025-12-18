@@ -460,6 +460,52 @@ async function run() {
       }
     });
 
+    // GET /leaderboard - Top users by wins
+    app.get("/leaderboard", async (req, res) => {
+      try {
+        const pipeline = [
+          {
+            $lookup: {
+              from: "contests",
+              let: { winnerUid: { $toString: "$uid" } },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ["$winner.uid", "$$winnerUid"] },
+                        { $eq: ["$status", "approved"] },
+                      ],
+                    },
+                  },
+                },
+                { $project: { prize: 1 } },
+              ],
+              as: "wonContests",
+            },
+          },
+          {
+            $project: {
+              displayName: 1,
+              photoURL: 1,
+              email: 1,
+              uid: 1,
+              wins: { $size: "$wonContests" },
+              totalPrize: { $sum: "$wonContests.prize" },
+            },
+          },
+          { $match: { wins: { $gt: 0 } } },
+          { $sort: { wins: -1, totalPrize: -1 } },
+        ];
+
+        const leaderboard = await usersCollection.aggregate(pipeline).toArray();
+        res.send(leaderboard);
+      } catch (error) {
+        console.error("Leaderboard error:", error);
+        res.status(500).send({ error: "Failed to load leaderboard" });
+      }
+    });
+
     // ==================== PAYMENT ROUTES ====================
     // Save payment and increase participants
     app.post("/save-payment", verifyFirebaseToken, async (req, res) => {
