@@ -9,20 +9,18 @@ const admin = require("firebase-admin");
 
 const port = process.env.PORT || 3000;
 
-const serviceAccount = require("./contest-hub-firebase-adminsdk.json");
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8"
+);
+const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-// Middleware
+// middleware
 app.use(express.json());
-app.use(
-  cors({
-    origin: ["http://localhost:5173"],
-    credentials: true,
-  })
-);
+app.use(cors());
 
 const verifyFirebaseToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -59,12 +57,12 @@ let contestsCollection,
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
     const db = client.db("contest_hub_db");
     usersCollection = db.collection("users");
     contestsCollection = db.collection("contests");
     submissionsCollection = db.collection("submissions");
-    paymentsCollection = db.collection("payments"); // New collection
+    paymentsCollection = db.collection("payments");
 
     const verifyRole = (requiredRole) => async (req, res, next) => {
       try {
@@ -81,7 +79,7 @@ async function run() {
       }
     };
 
-    // ==================== USER ROUTES ====================
+    // ==================== USER ROUTES ====================/////////// /
     app.post("/users", async (req, res) => {
       const { uid, email, displayName, photoURL } = req.body;
       if (!uid || !email)
@@ -131,7 +129,7 @@ async function run() {
       }
     });
 
-    // ==================== ADMIN ROUTES ====================
+    // ==================== ADMIN ROUTES ====================//////////////
     app.get(
       "/admin/users",
       verifyFirebaseToken,
@@ -204,7 +202,7 @@ async function run() {
       }
     );
 
-    // ==================== CREATOR ROUTES ====================
+    // ==================== CREATOR ROUTES ====================///////////
     app.get(
       "/creator/contests",
       verifyFirebaseToken,
@@ -282,7 +280,6 @@ async function run() {
       }
     );
 
-    // POST /creator/submissions - Get submissions for creator's contests
     app.post(
       "/creator/submissions",
       verifyFirebaseToken,
@@ -301,7 +298,6 @@ async function run() {
       }
     );
 
-    // PATCH /contests/:id/winner - Declare winner
     app.patch(
       "/contests/:id/winner",
       verifyFirebaseToken,
@@ -325,14 +321,13 @@ async function run() {
             { $set: { winner } }
           );
 
-          res.send({ success: true }); // ← Important: return success
+          res.send({ success: true });
         } catch (error) {
           res.status(500).send({ error: "Failed" });
         }
       }
     );
 
-    // POST /submissions - Save task submission
     app.post("/submissions", verifyFirebaseToken, async (req, res) => {
       const {
         contestId,
@@ -345,7 +340,6 @@ async function run() {
       } = req.body;
 
       try {
-        // Optional: Check if user has paid (extra security)
         const payment = await paymentsCollection.findOne({
           userUid,
           contestId,
@@ -355,7 +349,6 @@ async function run() {
           return res.status(403).send({ error: "You must pay to submit" });
         }
 
-        // Check if already submitted
         const existing = await submissionsCollection.findOne({
           userUid,
           contestId,
@@ -384,7 +377,6 @@ async function run() {
       }
     });
 
-    // GET /check-submission/:uid/:contestId - Check if user submitted
     app.get(
       "/check-submission/:uid/:contestId",
       verifyFirebaseToken,
@@ -404,7 +396,7 @@ async function run() {
       }
     );
 
-    // ==================== PUBLIC ROUTES ====================
+    // //==================== PUBLIC ROUTES ====================////////.
     app.get("/contests", async (req, res) => {
       const contests = await contestsCollection
         .find({ status: "approved" })
@@ -421,12 +413,11 @@ async function run() {
       res.send(contest);
     });
 
-    // GET /recent-winners - Last 3 contests with winners
     app.get("/recent-winners", async (req, res) => {
       try {
         const winners = await contestsCollection
           .find({ winner: { $exists: true } })
-          .sort({ "winner.declaredAt": -1 }) // or createdAt / deadline
+          .sort({ "winner.declaredAt": -1 })
           .limit(3)
           .toArray();
         res.send(winners);
@@ -435,7 +426,6 @@ async function run() {
       }
     });
 
-    // GET /contests/search?category=Design - Search by category
     app.get("/contests/search", async (req, res) => {
       const { category } = req.query;
 
@@ -444,7 +434,7 @@ async function run() {
           return res.send([]);
         }
 
-        const searchRegex = new RegExp(`^${category}$`, "i"); // Exact match, case-insensitive
+        const searchRegex = new RegExp(`^${category}$`, "i");
 
         const results = await contestsCollection
           .find({
@@ -460,7 +450,6 @@ async function run() {
       }
     });
 
-    // GET /leaderboard - Top users by wins
     app.get("/leaderboard", async (req, res) => {
       try {
         const pipeline = [
@@ -507,12 +496,11 @@ async function run() {
     });
 
     // ==================== PAYMENT ROUTES ====================
-    // Save payment and increase participants
+
     app.post("/save-payment", verifyFirebaseToken, async (req, res) => {
       const { contestId } = req.body;
 
       try {
-        // Check if already paid
         const existing = await paymentsCollection.findOne({
           userUid: req.user.uid,
           contestId,
@@ -522,7 +510,6 @@ async function run() {
           return res.send({ success: true, alreadyPaid: true });
         }
 
-        // Save payment record
         const paymentDoc = {
           userUid: req.user.uid,
           userEmail: req.user.email,
@@ -533,7 +520,6 @@ async function run() {
 
         await paymentsCollection.insertOne(paymentDoc);
 
-        // Increase participant count
         await contestsCollection.updateOne(
           { _id: new ObjectId(contestId) },
           { $inc: { participants: 1 } }
@@ -546,7 +532,6 @@ async function run() {
       }
     });
 
-    // Check if user paid for contest
     app.get(
       "/check-payment/:uid/:contestId",
       verifyFirebaseToken,
@@ -566,7 +551,6 @@ async function run() {
       }
     );
 
-    // Get user's participated contests for dashboard
     app.get("/my-participated", verifyFirebaseToken, async (req, res) => {
       const payments = await paymentsCollection
         .find({ userUid: req.user.uid })
@@ -580,13 +564,13 @@ async function run() {
 
       const contests = await contestsCollection
         .find({ _id: { $in: contestIds.map((id) => new ObjectId(id)) } })
-        .sort({ deadline: 1 }) // Upcoming first
+        .sort({ deadline: 1 })
         .toArray();
 
       res.send(contests);
     });
 
-    // ==================== STRIPE CHECKOUT ====================
+    // ==================== STRIPE CHECKOUT ====================.
     app.post(
       "/create-checkout-session",
       verifyFirebaseToken,
